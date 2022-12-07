@@ -46,9 +46,9 @@ type ApptainerContainerInstance struct {
 	BindMounts    []string
 }
 
-func (cont ApptainerContainerInstance) RunInContainer(command string, scrollOoutput bool) {
+func (cont ApptainerContainerInstance) RunInContainer(command string, scrollOutput bool) {
 	fc := fmt.Sprintf("%s --silent exec -B %s %s %s", getContainerRuntime(), strings.Join(cont.BindMounts, ","), cont.ContainerPath, command)
-	if scrollOoutput {
+	if scrollOutput {
 		RunCommand(fc, ScrollingOutputWriterNoLog)
 	} else {
 		RunPlainOutput(fc)

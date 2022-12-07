@@ -12,7 +12,10 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unicode/utf8"
+	"unsafe"
 )
 
 func WriteShellScript(filename string, content []string) {
@@ -50,16 +53,21 @@ type outputWriter struct {
 }
 
 var PlainOutputWriterNoLog = outputWriter{nil, os.Stdout, -1, ""}
-var ScrollingOutputWriterNoLog = outputWriter{nil, os.Stdout, 20, ""}
+var ScrollingOutputWriterNoLog = outputWriter{nil, os.Stdout, 20, "out.log"}
 
 func (o outputWriter) outputCanBeRolled() bool {
 	return o.maxNumberOfLines > 0 && !OutputIsRedirected()
 }
 
 func EraseLines(n int) {
+	//id := rand.Int()
 	for i := 0; i < n; i++ {
 		fmt.Printf("\033[2K\033[1A\033[2K")
+		//fmt.Printf("\rDEL %d | \033[1A \rDEL %d |", id%100, id%100)
 	}
+	//for i := 0; i < n; i++ {
+	//	fmt.Printf("\033[1B")
+	//}
 }
 
 func min(a int, b int) int {
@@ -162,11 +170,78 @@ func OutputIsRedirected() bool {
 	return (o.Mode() & os.ModeCharDevice) != os.ModeCharDevice
 }
 
-func PrintProgramOutput(lines []string, nLines int, maxLines int, pl int) {
-	EraseLines(pl)
-	fmt.Printf("################\n")
-	fmt.Printf("%s\n", strings.Join(lines[0:min(nLines, maxLines)], "\n"))
-	fmt.Printf("################\n")
+type winsize struct {
+	Row    uint16
+	Col    uint16
+	Xpixel uint16
+	Ypixel uint16
+}
+
+func getWidth() int {
+	ws := &winsize{}
+	retCode, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(syscall.Stdin),
+		uintptr(syscall.TIOCGWINSZ),
+		uintptr(unsafe.Pointer(ws)))
+
+	if int(retCode) == -1 {
+		panic(errno)
+	}
+	return int(ws.Col)
+}
+
+func PrintWindow(lines []string, nLines int, maxLines int) int {
+	ws := getWidth()
+	var resArr []string
+	for i := 0; i < min(nLines+1, maxLines); i++ {
+		if len(lines[i]) > 0 {
+			resArr = append(resArr, lines[i])
+		} else {
+			resArr = append(resArr, "")
+		}
+	}
+	fullPrint := strings.Join(resArr, "\n")
+	numLinesPrinted := 0
+	for _, c := range fullPrint {
+		if c == '\n' {
+			numLinesPrinted++
+		}
+	}
+	for _, s := range lines[0:min(nLines+1, maxLines)] {
+		if utf8.RuneCountInString(s) > ws {
+			numLinesPrinted += utf8.RuneCountInString(s) / ws
+		}
+	}
+
+	fmt.Printf("\r################\n")
+	fmt.Printf("%s", fullPrint)
+	if fullPrint[len(fullPrint)-1] != '\n' {
+		fmt.Printf("\n")
+		numLinesPrinted++
+	}
+	fmt.Printf("\r################\n")
+
+	return numLinesPrinted + 2
+
+}
+
+func PrintProgramOutput(done chan int64, lines *[]string, nLines *int, maxLines int) {
+	stop := false
+	for {
+		select {
+		case <-done:
+			stop = true
+		default:
+			if len((*lines)[0]) > 0 {
+				EraseLines(numPrintedLines)
+				numPrintedLines = PrintWindow(*lines, *nLines, maxLines)
+			}
+		}
+		time.Sleep(time.Millisecond * 200)
+		if stop {
+			break
+		}
+	}
 }
 
 func (o outputWriter) RawProgramPrint() {
@@ -179,9 +254,13 @@ func (o outputWriter) RawProgramPrint() {
 
 }
 
+var numPrintedLines int
+
+var gotCr = false
+
 func (o outputWriter) FollowProgramOutput() {
 	scanner := bufio.NewScanner(o.streamIn)
-	scanner.Split(bufio.ScanLines)
+	scanner.Split(bufio.ScanBytes)
 	var printLines = make([]string, o.maxNumberOfLines)
 	for i := range printLines {
 		printLines[i] = ""
@@ -192,32 +271,48 @@ func (o outputWriter) FollowProgramOutput() {
 		out, _ = os.Create(o.fullOutPutFile)
 	}
 	lineCounter := 0
-	numPrintedLines := 0
-	t1 := time.Now()
+	numPrintedLines = 0
+	var currentLine []byte
+	done := make(chan int64)
+	go PrintProgramOutput(done, &printLines, &lineCounter, o.maxNumberOfLines)
 	for scanner.Scan() {
-		t2 := time.Now()
-		m := scanner.Text()
+		if gotCr {
+			gotCr = false
+			currentLine = []byte{}
+		}
+		m := scanner.Bytes()
+		if m[0] != '\n' && m[0] != '\r' {
+			currentLine = append(currentLine, m[0])
+		}
+		if m[0] == '\r' {
+			gotCr = true
+		}
 		// Save the full output if we are showing just a partial view
 		if o.fullOutPutFile != "" {
-			_, err := out.WriteString(fmt.Sprintf("%s\n", m))
+			_, err := out.WriteString(fmt.Sprintf("%c", m[0]))
 			if err != nil {
 				panic(err.Error())
 			}
 		}
-		if lineCounter >= o.maxNumberOfLines {
-			for i := 0; i < o.maxNumberOfLines-1; i++ {
-				printLines[i] = printLines[i+1]
+		if m[0] == '\n' {
+			if lineCounter >= o.maxNumberOfLines-1 {
+				for i := 0; i < o.maxNumberOfLines-1; i++ {
+					printLines[i] = printLines[i+1]
+				}
+				currentLine = []byte{}
 			}
 		}
-		printLines[min(o.maxNumberOfLines-1, lineCounter)] = m
-		lineCounter++
-		if t2.Sub(t1).Milliseconds() > 100 {
-			t1 = time.Now()
-			PrintProgramOutput(printLines, lineCounter, o.maxNumberOfLines, numPrintedLines)
-			numPrintedLines = min(lineCounter, o.maxNumberOfLines) + 2
+		printLines[min(o.maxNumberOfLines-1, lineCounter)] = string(currentLine)
+		if m[0] == '\n' {
+			lineCounter++
+			currentLine = []byte{}
 		}
+
 	}
-	PrintProgramOutput(printLines, lineCounter, o.maxNumberOfLines, numPrintedLines)
+	done <- 1
+
+	EraseLines(numPrintedLines)
+	PrintWindow(printLines, lineCounter, o.maxNumberOfLines)
 }
 
 func PrintDownloadProgress(done chan int64, path string, totalSize int64) {

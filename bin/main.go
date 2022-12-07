@@ -14,6 +14,7 @@ func main() {
 	instd := DownloadDir + "/_instdir"
 	os.Mkdir(DownloadDir+"/_deploy", os.ModePerm)
 	os.Mkdir(DownloadDir+"/_instdir", os.ModePerm)
+	tykky.PrintInfo("Fetching container")
 	tykky.GetApptainerContainer("library://centos:7.9", DownloadDir+"/_deploy/container.sif", false)
 
 	containerInstd := "/TYKKY_CONTAINER"
@@ -30,6 +31,7 @@ func main() {
 		BindMounts: []string{instd + ":" + containerInstd, DownloadDir, os.Getenv("PWD")},
 	}
 	progPath, _ := os.Executable()
+	tykky.PrintInfo("Installing conda")
 	cont.RunInContainer(fmt.Sprintf("%s/condaInstall -log-dir %s -config conda_config.json", filepath.Dir(progPath), DownloadDir), false)
 	cInst := tykky.CondaInstallation{
 		CmdPath:     c.InstallationDir + "/bin/conda",
@@ -41,12 +43,16 @@ func main() {
 		Conda:              cInst,
 		PipRequirementFile: "",
 		CondaEnvFile:       "env.yaml",
-		UseMamba:           false,
+		UseMamba:           true,
 	}
 	installScript := T.ConstructRunScript("", "")
 	installScript = append([]string{"export installroot=" + containerInstd}, installScript...)
 	tykky.WriteShellScript(DownloadDir+"/script.sh", installScript)
+	tykky.PrintInfo("Installing conda environment")
 	cont.RunInContainer(DownloadDir+"/script.sh", true)
+	tykky.PrintInfo("Creating squashfs image")
+	tykky.RunPlainOutput(fmt.Sprintf("mksquashfs %s %s/img.sqfs -processors 4 -noappend", instd, DownloadDir+"/_deploy"))
+	//cont.RunInContainer("./min.sh", true)
 
 	/*
 		installErr := condaSrc{condaDefaultBaseUrl, "latest", "Linux-x86_64"}.SetupConda(config.instDir)

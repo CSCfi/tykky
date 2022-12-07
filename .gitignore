@@ -1,5 +1,5 @@
-.yaml
-.yml
-.json
-.sh
-.vscode
+*.yaml
+*.yml
+*.json
+*.sh
+*.vscode
